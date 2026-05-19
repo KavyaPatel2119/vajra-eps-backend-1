@@ -34,19 +34,14 @@ interface QuizGenerationResponse {
 export class GeminiService {
   private client: GoogleGenerativeAI;
   private model: any;
-  private currentModelName = process.env.GEMINI_MODEL || 'gemini-1.5-flash';
+  private currentModelName = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
   private readonly maxQuestionsPerRequest = 10;
   private readonly maxConcurrentGenerations = Math.max(
     1,
     Math.min(3, Number(process.env.GEMINI_MAX_CONCURRENT_GENERATIONS || 1))
   );
   private readonly fallbackModels = [
-    'gemini-1.5-flash',
-    'gemini-1.5-flash-8b',
-    'gemini-2.0-flash-lite',
-    'gemini-2.0-flash',
-    'gemini-1.5-pro',
-    'gemini-pro',
+    'gemini-2.5-flash',
   ];
 
   constructor() {
