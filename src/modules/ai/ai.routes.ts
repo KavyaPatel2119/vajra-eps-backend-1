@@ -106,6 +106,22 @@ async function uploadQueuedAiMaterial(file: Express.Multer.File) {
   return uploaded.key;
 }
 
+async function generateQuizNow(params: {
+  materialText: string;
+  questionCount: number;
+  types: string[];
+  difficulty: string;
+}) {
+  const response = await geminiService.generateQuiz(params);
+  const validation = geminiService.validateQuestions(response.questions);
+
+  if (!validation.valid) {
+    return { response, validation };
+  }
+
+  return { response, validation };
+}
+
 /**
  * POST /api/v1/ai/generate-quiz
  * Generate quiz from material text
@@ -158,31 +174,47 @@ router.post('/generate-quiz', authMiddleware, rbacMiddleware(['FACULTY']), uploa
     logger.info(`Generating ${questionCount} quiz questions (types: ${types.join(', ')})...`);
 
     if (useQueue) {
-      queuedS3Key = file ? await uploadQueuedAiMaterial(file) : undefined;
-      const job = await queueService.addJob('ai-quiz-generation', {
-        materialText: finalMaterial,
-        questionCount,
-        types,
-        difficulty: String(difficulty || 'MIXED').toUpperCase(),
-        fileS3Key: queuedS3Key,
-        mimeType: file?.mimetype,
-        originalName: file?.originalname,
-      });
-      jobQueued = true;
-      return res.status(202).json({
-        status: 'ACCEPTED',
-        data: job,
-      });
+      try {
+        queuedS3Key = file ? await uploadQueuedAiMaterial(file) : undefined;
+        const job = await queueService.addJob('ai-quiz-generation', {
+          materialText: finalMaterial,
+          questionCount,
+          types,
+          difficulty: String(difficulty || 'MIXED').toUpperCase(),
+          fileS3Key: queuedS3Key,
+          mimeType: file?.mimetype,
+          originalName: file?.originalname,
+        });
+        jobQueued = true;
+        return res.status(202).json({
+          status: 'ACCEPTED',
+          data: job,
+        });
+      } catch (queueError) {
+        if (queuedS3Key) {
+          await s3Service.deleteFile(queuedS3Key).catch(() => undefined);
+          queuedS3Key = undefined;
+        }
+        logger.warn('AI queue unavailable; falling back to synchronous generation', queueError);
+      }
     }
 
-    const response = await geminiService.generateQuiz({
-      materialText: finalMaterial,
+    let syncMaterial = finalMaterial;
+    if (file && !extractedMaterial) {
+      extractedMaterial = await extractMaterialFromFile(file);
+      const fallbackNarrowedMaterial = narrowMaterialToRequestedUnit(extractedMaterial, String(materialText || ''));
+      syncMaterial = [fallbackNarrowedMaterial, materialText]
+        .filter((v) => typeof v === 'string' && v.trim().length > 0)
+        .join('\n\n---\n\n')
+        .trim();
+    }
+
+    const { response, validation } = await generateQuizNow({
+      materialText: syncMaterial,
       questionCount,
       types,
       difficulty: String(difficulty || 'MIXED').toUpperCase(),
     });
-
-    const validation = geminiService.validateQuestions(response.questions);
 
     if (!validation.valid) {
       logger.warn('Validation errors:', validation.errors);
