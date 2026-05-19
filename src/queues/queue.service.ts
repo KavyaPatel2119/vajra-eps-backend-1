@@ -1,5 +1,6 @@
 import { Job, Queue, Worker } from 'bullmq';
 import logger from '../config/logger';
+import { lookup } from 'dns/promises';
 import { geminiService } from '../services/gemini.service';
 import { UFMService } from '../modules/ufm/ufm.service';
 import { ExamService } from '../modules/exams/exam.service';
@@ -23,7 +24,27 @@ const connection = {
   username: parsedRedis.username || undefined,
   password: parsedRedis.password || undefined,
 };
-const queuesDisabled = process.env.NODE_ENV === 'test' || process.env.BULLMQ_DISABLED === 'true';
+let queuesDisabled = process.env.NODE_ENV === 'test' || process.env.BULLMQ_DISABLED === 'true';
+
+function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+// DNS pre-check: if the Redis hostname is not resolvable from this environment,
+// disable the queues to avoid noisy ENOTFOUND errors from BullMQ.
+(async () => {
+  if (queuesDisabled) return;
+  try {
+    // Skip check for localhost and loopback
+    if (['127.0.0.1', '::1', 'localhost'].includes(parsedRedis.hostname)) return;
+    await lookup(parsedRedis.hostname);
+  } catch (err) {
+    logger.warn(
+      `Redis hostname '${parsedRedis.hostname}' is not resolvable from this environment — disabling background queues. Set REDIS_URL/BULLMQ_REDIS_URL to a reachable Redis instance.`
+    );
+    queuesDisabled = true;
+  }
+})();
 
 async function readJobFileBuffer(data: any) {
   if (data.fileS3Key) {
@@ -70,7 +91,12 @@ class QueueService {
       throw new Error('Background queue is disabled in this environment');
     }
     if (!this.queue) {
-      this.queue = new Queue('vajra-heavy-tasks', { connection });
+      try {
+        this.queue = new Queue('vajra-heavy-tasks', { connection });
+      } catch (err) {
+        logger.warn('Failed to create BullMQ Queue instance, will retry when startWorker runs', err);
+        throw err;
+      }
     }
     return this.queue;
   }
@@ -115,7 +141,9 @@ class QueueService {
       return;
     }
     if (this.worker) return;
-    this.worker = new Worker(
+    const tryStart = async () => {
+      try {
+        this.worker = new Worker(
       'vajra-heavy-tasks',
       async (job) => {
         logger.info(`Processing heavy job ${job.name}:${job.id}`);
@@ -200,12 +228,21 @@ class QueueService {
         }
         throw new Error(`Unsupported job type: ${job.name}`);
       },
-      { connection, concurrency: Number(process.env.WORKER_CONCURRENCY || 2) }
-    );
+          { connection, concurrency: Number(process.env.WORKER_CONCURRENCY || 2) }
+        );
 
-    this.worker.on('failed', (job, error) => {
-      logger.error(`Heavy job failed ${job?.name}:${job?.id}`, error);
-    });
+        this.worker.on('failed', (job, error) => {
+          logger.error(`Heavy job failed ${job?.name}:${job?.id}`, error);
+        });
+        logger.info('Background queue worker started');
+      } catch (err) {
+        logger.warn('Failed to start queue worker — will retry in 5s', err);
+        await sleep(5000);
+        return tryStart();
+      }
+    };
+
+    void tryStart();
   }
 }
 
