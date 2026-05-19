@@ -31,12 +31,20 @@ export function setupWebRTCHandlers(io: SocketIOServer) {
         return;
       }
 
+      const existingPeer = await getPeerState(socket.id);
+      const wasAlreadySharing = Boolean(
+        existingPeer &&
+        existingPeer.examId === examId &&
+        existingPeer.role === 'STUDENT' &&
+        existingPeer.isScreenSharing === true
+      );
+
       const peerInfo: PeerConnectionState = {
         userId: user.id,
         examId,
         role: user.role,
         socketId: socket.id,
-        isScreenSharing: false,
+        isScreenSharing: wasAlreadySharing,
       };
 
       await setPeerState(peerInfo);
@@ -44,7 +52,7 @@ export function setupWebRTCHandlers(io: SocketIOServer) {
 
       socket.join(`exam:${examId}`);
       if (user.role === 'STUDENT') {
-        io.to(`exam:${examId}:faculty`).emit('webrtc:student-available', {
+        io.to(`exam:${examId}:faculty`).emit(wasAlreadySharing ? 'webrtc:student-screen-sharing' : 'webrtc:student-available', {
           studentId: user.id,
           socketId: socket.id,
           examId,
@@ -119,8 +127,17 @@ export function setupWebRTCHandlers(io: SocketIOServer) {
      */
     socket.on('webrtc:screen-frame', async (data: { examId: string; image: string; width?: number; height?: number; timestamp?: number }) => {
       const peer = await getPeerState(socket.id);
-      if (!peer || peer.role !== 'STUDENT' || peer.examId !== data.examId || !peer.isScreenSharing) {
+      if (!peer || peer.role !== 'STUDENT' || peer.examId !== data.examId || typeof data.image !== 'string' || !data.image.startsWith('data:image/')) {
         return;
+      }
+
+      if (!peer.isScreenSharing) {
+        await updatePeerScreenSharing(socket.id, true);
+        io.to(`exam:${data.examId}:faculty`).emit('webrtc:student-screen-sharing', {
+          studentId: peer.userId,
+          socketId: socket.id,
+          examId: data.examId,
+        });
       }
 
       io.to(`exam:${data.examId}:faculty`).emit('webrtc:screen-frame', {
