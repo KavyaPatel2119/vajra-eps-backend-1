@@ -64,7 +64,17 @@ async function ensureDatabaseConnection() {
 
 export function createApp() {
   const app = express();
-  app.set('trust proxy', APP_CONFIG.NODE_ENV === 'test' ? false : true);
+  // Configure `trust proxy` via APP_TRUST_PROXY env to satisfy express-rate-limit
+  // If not provided: use 1 in production (behind one proxy), 0 otherwise
+  const rawTrustProxy = process.env.APP_TRUST_PROXY;
+  let trustProxyValue: any;
+  if (rawTrustProxy !== undefined) {
+    const n = Number(rawTrustProxy);
+    trustProxyValue = Number.isInteger(n) ? n : rawTrustProxy;
+  } else {
+    trustProxyValue = APP_CONFIG.NODE_ENV === 'production' ? 1 : 0;
+  }
+  app.set('trust proxy', trustProxyValue);
 
   // Security
   app.use(helmet());
