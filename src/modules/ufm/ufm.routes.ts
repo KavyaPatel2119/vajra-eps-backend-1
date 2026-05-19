@@ -15,6 +15,29 @@ const router = Router();
 const ufmService = new UFMService();
 const upload = createDiskUpload(500 * 1024 * 1024); // 500MB for video
 
+async function queueOrGenerateUfmPdf(ufmId: string) {
+  try {
+    return {
+      mode: 'queued',
+      job: await queueService.addJob('ufm-pdf-report', { ufmId }),
+    };
+  } catch (queueError) {
+    logger.warn('UFM PDF queue unavailable; generating report synchronously', queueError);
+    try {
+      return {
+        mode: 'sync',
+        report: await ufmService.createAndAttachPdfReport(ufmId),
+      };
+    } catch (syncError) {
+      logger.error('UFM PDF generation failed after queue fallback', syncError);
+      return {
+        mode: 'failed',
+        error: syncError instanceof Error ? syncError.message : 'UFM PDF generation failed',
+      };
+    }
+  }
+}
+
 // POST create UFM case (FACULTY) — must be registered before /:ufmId routes
 router.post('/cases', authMiddleware, rbacMiddleware(['FACULTY']), async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -44,9 +67,9 @@ router.post('/cases', authMiddleware, rbacMiddleware(['FACULTY']), async (req: R
       severity: 'CRITICAL',
       evidence,
     });
-    const pdfJob = await queueService.addJob('ufm-pdf-report', { ufmId: (report as any).ufmId });
+    const pdf = await queueOrGenerateUfmPdf(String((report as any).ufmId));
 
-    res.status(201).json(ResponseFormatter.success({ report, pdfJob }));
+    res.status(201).json(ResponseFormatter.success({ report, pdf }));
   } catch (error) {
     next(error);
   }
@@ -146,8 +169,8 @@ router.post('/:ufmId/generate-pdf', authMiddleware, rbacMiddleware(['FACULTY']),
       const report = await ufmService.createAndAttachPdfReport(req.params.ufmId);
       return res.json(ResponseFormatter.success(report));
     }
-    const job = await queueService.addJob('ufm-pdf-report', { ufmId: req.params.ufmId });
-    res.status(202).json(ResponseFormatter.success(job, 202));
+    const pdf = await queueOrGenerateUfmPdf(req.params.ufmId);
+    res.status(pdf.mode === 'queued' ? 202 : 200).json(ResponseFormatter.success(pdf, pdf.mode === 'queued' ? 202 : 200));
   } catch (error) {
     next(error);
   }
